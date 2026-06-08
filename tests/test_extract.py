@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from probe_lab import PROMPT_COLUMN, Activations, PromptSet, extract
+from probe_lab import PROMPT_COLUMN, Activations, Pooling, PromptSet, extract
 
 # SmolLM2-135M dimensions: 30 transformer blocks + 1 embedding layer, hidden 576.
 N_LAYERS = 31
@@ -26,10 +26,15 @@ def promptset():
     return PromptSet(df)
 
 
+@pytest.fixture(scope="module", params=[Pooling.MEAN, Pooling.LAST])
+def pooling(request):
+    return request.param
+
+
 @pytest.fixture(scope="module")
-def acts(promptset):
-    # model load + forward happens once for the whole module
-    return extract(promptset, model="SmolLM2-135M", pooling="mean")
+def acts(promptset, pooling):
+    # one model load + forward per pooling mode
+    return extract(promptset, model="SmolLM2-135M", pooling=pooling)
 
 
 @pytest.mark.model
@@ -48,11 +53,11 @@ def test_layer_accessor(acts, promptset):
 
 
 @pytest.mark.model
-def test_source_aligned(acts, promptset):
+def test_source_aligned(acts, promptset, pooling):
     assert acts.promptset is promptset
     assert list(acts.meta.columns) == list(promptset.df.columns)
     assert len(acts.meta) == len(promptset)
-    assert acts.pooling == "mean"
+    assert acts.pooling == pooling
     assert acts.model == "SmolLM2-135M"
 
 
@@ -62,16 +67,16 @@ def test_finite(acts):
 
 
 @pytest.mark.model
-def test_residual_alignment(acts, promptset):
+def test_residual_alignment(acts, promptset, pooling):
     # "hello" (index 2) is the shortest prompt, so inside the batch it is
     # right-padded. Extracting it ALONE (batch of 1, no padding) must reproduce
     # its batched row to float precision -> proves (a) row i maps to prompt i and
-    # (b) padding does not leak into the kept activations.
+    # (b) padding does not leak into the kept activations. Holds for both poolings.
     i = 2
     single = extract(
         PromptSet(pd.DataFrame({PROMPT_COLUMN: [promptset.prompts[i]]})),
         model="SmolLM2-135M",
-        pooling="mean",
+        pooling=pooling,
     )
     single_row = single.acts[0]              # (n_layers, H), unpadded
     # residual-stream magnitude varies hugely across layers (RMS ~0.1 to ~850),
@@ -87,7 +92,15 @@ def test_residual_alignment(acts, promptset):
     assert other_rel > 1e-1, f"row {i} matches a different prompt too: {other_rel}"
 
 
-def test_unimplemented_pooling_raises(promptset):
-    # checked before any model load, so this is fast
-    with pytest.raises(NotImplementedError, match="mean"):
-        extract(promptset, pooling="last")
+@pytest.mark.model
+def test_mean_and_last_differ(promptset):
+    # guard against `last` silently computing the mean
+    mean = extract(promptset, model="SmolLM2-135M", pooling=Pooling.MEAN)
+    last = extract(promptset, model="SmolLM2-135M", pooling=Pooling.LAST)
+    assert not np.allclose(mean.acts, last.acts)
+
+
+def test_invalid_pooling_raises(promptset):
+    # coercion to Pooling rejects unknown values before any model load (fast)
+    with pytest.raises(ValueError):
+        extract(promptset, pooling="sum")

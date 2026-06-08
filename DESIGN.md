@@ -49,17 +49,22 @@ scripts' problem, and an extension if we ever want them.)*
 ## 2. extract — residual activations, aligned & cached
 
 ```python
+class Pooling(StrEnum):   # LAST="last", MEAN="mean"
+    ...
+
 def extract(ps: PromptSet, *, model: str,
-            pooling: str = "last",        # "last" | "mean"
+            pooling: Pooling | str = Pooling.LAST,   # accepts the enum or its value
             layers="all") -> Activations
 ```
 
 - Pulls the **residual stream** per layer via `output_hidden_states=True`
   (embedding + every block) — exactly what we already have working.
-- We **right-pad** (pads on the end). `pooling="mean"` averages over the real
-  tokens (`(h*mask).sum(1) / mask.sum(1)`). `pooling="last"` takes the last real
-  token, which with right-padding is *not* the final column, so we index it via
-  the mask: `h[arange(B), mask.sum(1) - 1]`. Just the two.
+- `pooling` is a `Pooling` enum (default `LAST`); `extract` coerces a passed
+  string so `"last"`/`"mean"` also work. We **right-pad** (pads on the end).
+  `Pooling.MEAN` averages over the real tokens (`(h*mask).sum(1) / mask.sum(1)`).
+  `Pooling.LAST` takes the last real token, which with right-padding is *not* the
+  final column, so we index it via the mask: `h[arange(B), attn.sum(1) - 1]`.
+  Just the two.
 - Why padding side is a non-issue here: our models (SmolLM2 / Qwen / Pythia) use
   **rotary (RoPE)** position embeddings, which encode *relative* position — the
   QK score depends only on `(m - n)`. Padding uniformly shifts all real-token
@@ -78,7 +83,7 @@ class Activations:
     acts: np.ndarray        # (N, n_layers, H)
     promptset: PromptSet    # the source PromptSet (prompts, ids, metadata)
     model: str
-    pooling: str
+    pooling: Pooling
 
     @property
     def meta(self) -> pd.DataFrame:      # convenience -> promptset.df

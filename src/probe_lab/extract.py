@@ -5,7 +5,8 @@ Runs a PromptSet's prompts through a causal LM and pulls the residual stream
 into one vector per (example, layer). The result is row-aligned to the source
 PromptSet: row i of `acts` corresponds to prompt i.
 
-Only `mean` pooling is implemented so far. Right-padding is used (the
+Two token reductions are supported: `last` (the final real token, the default
+and conventional causal-LM readout) and `mean`. Right-padding is used (the
 transformers default); it's correct for the rotary-position models we target
 (SmolLM2 / Qwen / Pythia) because RoPE encodes *relative* position, so a uniform
 pad shift leaves real-token activations unchanged given the attention mask.
@@ -14,6 +15,7 @@ pad shift leaves real-token activations unchanged given the attention mask.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 
 import numpy as np
 import pandas as pd
@@ -25,6 +27,13 @@ from probe_lab.prompts import PromptSet
 # short name -> HF id; a raw HF id may also be passed through directly
 MODELS = {"SmolLM2-135M": "HuggingFaceTB/SmolLM2-135M"}
 DEFAULT_MODEL = "SmolLM2-135M"
+
+
+class Pooling(StrEnum):
+    """How to reduce a sequence's per-token activations into one vector."""
+
+    LAST = "last"   # the final real token (conventional causal-LM readout)
+    MEAN = "mean"   # mean over real tokens
 
 
 def get_device() -> str:
@@ -51,6 +60,25 @@ def _load_model(model: str):
     return net, tokenizer, device
 
 
+def _pool(hidden_states, attn, pooling: Pooling):
+    """Reduce each layer's (B, T, H) hidden state over tokens -> list of (B, H).
+
+    Assumes right-padding (real tokens contiguous from index 0).
+    """
+    match pooling:
+        case Pooling.MEAN:
+            mask = attn.unsqueeze(-1).float()                   # (B, T, 1)
+            counts = mask.sum(dim=1).clamp(min=1)
+            return [((h * mask).sum(dim=1) / counts).float().cpu()
+                    for h in hidden_states]
+        case Pooling.LAST:
+            rows = torch.arange(attn.shape[0], device=attn.device)
+            last_idx = attn.sum(dim=1) - 1                      # last real token (B,)
+            return [h[rows, last_idx].float().cpu() for h in hidden_states]
+        case _:
+            raise NotImplementedError(f"unhandled pooling {pooling!r}")
+
+
 @dataclass
 class Activations:
     """Residual-stream activations, row-aligned to `promptset`.
@@ -62,7 +90,7 @@ class Activations:
     acts: np.ndarray            # (N, L+1, H) float32
     promptset: PromptSet        # source PromptSet (prompts, ids, metadata)
     model: str
-    pooling: str
+    pooling: Pooling
 
     @property
     def meta(self) -> pd.DataFrame:
@@ -87,28 +115,30 @@ class Activations:
     def __repr__(self) -> str:
         return (
             f"Activations(n={len(self)}, n_layers={self.n_layers}, "
-            f"H={self.hidden_size}, model={self.model!r}, pooling={self.pooling!r})"
+            f"H={self.hidden_size}, model={self.model!r}, pooling={self.pooling.value!r})"
         )
 
 
 @torch.no_grad()
 def extract(ps: PromptSet, *, model: str = DEFAULT_MODEL,
-            pooling: str = "mean", batch_size: int = 16) -> Activations:
+            pooling: Pooling | str = Pooling.LAST,
+            batch_size: int = 16) -> Activations:
     """Extract per-layer residual activations for every prompt in `ps`.
 
     Args:
         ps: the prompts to run.
         model: registry name (see MODELS) or a raw HF id.
-        pooling: token reduction. Only "mean" is implemented so far.
+        pooling: token reduction, a `Pooling` member or its string value
+            ("last" or "mean"). Defaults to `Pooling.LAST`.
         batch_size: prompts per forward pass.
 
     Returns:
         Activations with `acts` of shape (N, n_layers, H), aligned to `ps`.
+
+    Raises:
+        ValueError: if `pooling` is not a valid `Pooling` value.
     """
-    if pooling != "mean":
-        raise NotImplementedError(
-            f"only 'mean' pooling is implemented so far, got {pooling!r}"
-        )
+    pooling = Pooling(pooling)  # coerce + validate (ValueError on unknown)
 
     net, tokenizer, device = _load_model(model)
     prompts = ps.prompts
@@ -119,11 +149,7 @@ def extract(ps: PromptSet, *, model: str = DEFAULT_MODEL,
         enc = tokenizer(batch, return_tensors="pt", padding=True, truncation=True)
         enc = {k: v.to(device) for k, v in enc.items()}
         out = net(**enc)
-
-        mask = enc["attention_mask"].unsqueeze(-1).float()      # (B, T, 1)
-        counts = mask.sum(dim=1).clamp(min=1)
-        pooled = [((h * mask).sum(dim=1) / counts).float().cpu()
-                  for h in out.hidden_states]                    # each (B, H)
+        pooled = _pool(out.hidden_states, enc["attention_mask"], pooling)  # list (B,H)
         chunks.append(torch.stack(pooled).permute(1, 0, 2))      # (B, L+1, H)
 
     acts = torch.cat(chunks).numpy()
