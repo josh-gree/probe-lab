@@ -76,15 +76,19 @@ def extract(ps: PromptSet, *, model: str,
 ```python
 class Activations:
     acts: np.ndarray        # (N, n_layers, H)
-    meta: pd.DataFrame      # == ps.df, row-aligned
+    promptset: PromptSet    # the source PromptSet (prompts, ids, metadata)
     model: str
     pooling: str
 
+    @property
+    def meta(self) -> pd.DataFrame:      # convenience -> promptset.df
     def layer(self, l) -> np.ndarray     # (N, H)
 ```
 
-`acts` and `meta` are always the same N in the same order. That single
-invariant is the framework.
+`Activations` holds the source `PromptSet` (not a bare DataFrame), so it stays
+tied to the object guaranteeing the prompt/id invariants; `.meta` exposes
+`promptset.df` for the probe stage. `acts` and `meta` are always the same N in
+the same order — that single invariant is the framework.
 
 ---
 

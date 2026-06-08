@@ -14,8 +14,10 @@ full spec and design decisions.
 Early. Implemented so far:
 
 - `PromptSet.from_parquet` — load prompts + metadata from a parquet file.
+- `extract` — run prompts through a model and pull the residual stream
+  (every layer), mean-pooled over tokens, row-aligned to the PromptSet.
 
-Next: residual-activation extraction and the linear-probe analysis.
+Next: `last`-token pooling, activation caching, and the linear-probe analysis.
 
 ## Usage
 
