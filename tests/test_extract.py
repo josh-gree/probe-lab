@@ -61,6 +61,32 @@ def test_finite(acts):
     assert np.isfinite(acts.acts).all()
 
 
+@pytest.mark.model
+def test_residual_alignment(acts, promptset):
+    # "hello" (index 2) is the shortest prompt, so inside the batch it is
+    # right-padded. Extracting it ALONE (batch of 1, no padding) must reproduce
+    # its batched row to float precision -> proves (a) row i maps to prompt i and
+    # (b) padding does not leak into the kept activations.
+    i = 2
+    single = extract(
+        PromptSet(pd.DataFrame({PROMPT_COLUMN: [promptset.prompts[i]]})),
+        model="SmolLM2-135M",
+        pooling="mean",
+    )
+    single_row = single.acts[0]              # (n_layers, H), unpadded
+    # residual-stream magnitude varies hugely across layers (RMS ~0.1 to ~850),
+    # so compare *relative* to scale, not with an absolute tolerance.
+    scale = np.sqrt((single_row ** 2).mean())
+    self_rel = np.abs(acts.acts[i] - single_row).max() / scale
+    # contrast: the same single activation vs a DIFFERENT prompt's row
+    other_rel = np.abs(single_row - acts.acts[(i + 1) % len(acts)]).max() / scale
+
+    # embedding layer is position-free, so padding can't touch it at all
+    assert np.array_equal(acts.acts[i, 0], single_row[0])
+    assert self_rel < 1e-3, f"row {i} does not match its own prompt: {self_rel}"
+    assert other_rel > 1e-1, f"row {i} matches a different prompt too: {other_rel}"
+
+
 def test_unimplemented_pooling_raises(promptset):
     # checked before any model load, so this is fast
     with pytest.raises(NotImplementedError, match="mean"):
